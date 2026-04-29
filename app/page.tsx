@@ -35,12 +35,29 @@ type ServerMessage =
   | { type: "signal"; from: string; payload: SignalPayload }
   | { type: "error"; message: string };
 
-const iceServers: RTCConfiguration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-};
-
 function createRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+function getIceConfiguration(): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+  const turnUrl = process.env.NEXT_PUBLIC_TURN_URL?.trim();
+  const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME?.trim();
+  const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL?.trim();
+  const transportPolicy = process.env.NEXT_PUBLIC_WEBRTC_TRANSPORT_POLICY?.trim();
+
+  if (turnUrl && turnUsername && turnCredential) {
+    iceServers.push({
+      urls: turnUrl.split(",").map((url) => url.trim()).filter(Boolean),
+      username: turnUsername,
+      credential: turnCredential,
+    });
+  }
+
+  return {
+    iceServers,
+    iceTransportPolicy: transportPolicy === "relay" ? "relay" : "all",
+  };
 }
 
 function getSignalingUrl() {
@@ -140,7 +157,7 @@ export default function Home() {
     const existing = connections.current[remote.id];
     if (existing) return existing;
 
-    const connection = new RTCPeerConnection(iceServers);
+    const connection = new RTCPeerConnection(getIceConfiguration());
     connections.current[remote.id] = connection;
     updateRemotePeer(remote.id, { ...remote, connected: false });
 

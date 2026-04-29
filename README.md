@@ -51,3 +51,21 @@ NEXT_PUBLIC_SIGNALING_URL=wss://your-signaling-server.example.com/ws
 ```
 
 Without that environment variable, the app tries to connect to `/ws` on the same domain. That works locally with `npm run dev`, but not on a standard Vercel deployment.
+
+## TURN Relay
+
+If users join the same room but stay stuck on `checking`, signaling is working but the browsers cannot create a direct peer-to-peer media path. Add a TURN service and set these Vercel environment variables:
+
+```bash
+NEXT_PUBLIC_TURN_URL=turn:your-turn-server.example.com:3478
+NEXT_PUBLIC_TURN_USERNAME=your-turn-username
+NEXT_PUBLIC_TURN_CREDENTIAL=your-turn-password
+```
+
+For testing, you can temporarily force all WebRTC traffic through TURN:
+
+```bash
+NEXT_PUBLIC_WEBRTC_TRANSPORT_POLICY=relay
+```
+
+After changing any `NEXT_PUBLIC_` variable in Vercel, redeploy the app.
