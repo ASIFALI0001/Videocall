@@ -498,17 +498,55 @@ export default function Home() {
 
 function RemoteTile({ peer }: { peer: RemotePeer }) {
   const video = useRef<HTMLVideoElement | null>(null);
+  const [videoReady, setVideoReady] = useState(false);
+  const [playbackBlocked, setPlaybackBlocked] = useState(false);
 
   useEffect(() => {
-    if (video.current && peer.stream) {
-      video.current.srcObject = peer.stream;
-    }
+    const element = video.current;
+    if (!element || !peer.stream) return;
+
+    setVideoReady(false);
+    setPlaybackBlocked(false);
+    element.srcObject = peer.stream;
+
+    const playRemoteVideo = async () => {
+      try {
+        await element.play();
+        setPlaybackBlocked(false);
+      } catch {
+        setPlaybackBlocked(true);
+      }
+    };
+
+    playRemoteVideo();
   }, [peer.stream]);
+
+  async function startPlayback() {
+    if (!video.current) return;
+
+    try {
+      await video.current.play();
+      setPlaybackBlocked(false);
+    } catch {
+      setPlaybackBlocked(true);
+    }
+  }
 
   return (
     <article className="tile">
-      <video ref={video} autoPlay playsInline />
+      <video
+        ref={video}
+        autoPlay
+        playsInline
+        onCanPlay={startPlayback}
+        onPlaying={() => setVideoReady(true)}
+      />
       {!peer.stream ? <div className="avatar">{peer.name.slice(0, 1).toUpperCase()}</div> : null}
+      {peer.stream && !videoReady ? (
+        <button className="videoPrompt" onClick={startPlayback}>
+          {playbackBlocked ? "Tap to start video" : "Starting video"}
+        </button>
+      ) : null}
       <div className="nameplate">
         {peer.name}
         <span className={peer.connected ? "online" : "connecting"}>
