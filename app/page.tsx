@@ -42,6 +42,14 @@ function createRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
+function getSignalingUrl() {
+  const configuredUrl = process.env.NEXT_PUBLIC_SIGNALING_URL?.trim();
+  if (configuredUrl) return configuredUrl;
+
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}/ws`;
+}
+
 export default function Home() {
   const [roomId, setRoomId] = useState("");
   const [name, setName] = useState("");
@@ -203,8 +211,7 @@ export default function Home() {
     setStatus("Opening camera and microphone...");
     await ensureMedia();
 
-    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+    const ws = new WebSocket(getSignalingUrl());
     socket.current = ws;
 
     ws.onopen = () => {
@@ -261,7 +268,11 @@ export default function Home() {
     };
 
     ws.onclose = () => {
-      if (joined) setStatus("Disconnected");
+      setStatus("Signaling server disconnected");
+    };
+
+    ws.onerror = () => {
+      setStatus("Could not connect to the signaling server");
     };
   }
 

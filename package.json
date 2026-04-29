@@ -6,6 +6,7 @@
     "dev": "node server.js",
     "build": "next build",
     "start": "node server.js",
+    "signal": "node signaling-server.js",
     "lint": "next lint"
   },
   "dependencies": {
