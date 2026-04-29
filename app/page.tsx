@@ -21,6 +21,7 @@ type RemotePeer = PeerInfo & {
   stream?: MediaStream;
   connected: boolean;
   state?: string;
+  trackSummary?: string;
 };
 
 type SignalPayload =
@@ -37,6 +38,47 @@ type ServerMessage =
 
 function createRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+function debugLog(label: string, data?: unknown) {
+  console.log(`[PulseCall] ${label}`, data ?? "");
+}
+
+function summarizeTrack(track: MediaStreamTrack) {
+  return {
+    id: track.id,
+    kind: track.kind,
+    label: track.label,
+    enabled: track.enabled,
+    muted: track.muted,
+    readyState: track.readyState,
+    settings: track.kind === "video" ? track.getSettings() : undefined,
+  };
+}
+
+function summarizeStream(stream: MediaStream) {
+  return stream.getTracks().map(summarizeTrack);
+}
+
+function summarizeReceiverStats(report: RTCStatsReport) {
+  const inboundVideo = [];
+
+  for (const stat of report.values()) {
+    if (stat.type === "inbound-rtp" && stat.kind === "video") {
+      inboundVideo.push({
+        packetsReceived: stat.packetsReceived,
+        packetsLost: stat.packetsLost,
+        bytesReceived: stat.bytesReceived,
+        framesDecoded: stat.framesDecoded,
+        framesReceived: stat.framesReceived,
+        frameWidth: stat.frameWidth,
+        frameHeight: stat.frameHeight,
+        jitter: stat.jitter,
+      });
+    }
+  }
+
+  return inboundVideo;
 }
 
 function getIceConfiguration(): RTCConfiguration {
@@ -126,6 +168,7 @@ export default function Home() {
 
     cameraStream.current = stream;
     localStream.current = stream;
+    debugLog("local media ready", summarizeStream(stream));
 
     if (localVideo.current) {
       localVideo.current.srcObject = stream;
@@ -157,18 +200,41 @@ export default function Home() {
     const existing = connections.current[remote.id];
     if (existing) return existing;
 
-    const connection = new RTCPeerConnection(getIceConfiguration());
+    const config = getIceConfiguration();
+    debugLog("create peer connection", {
+      remote,
+      iceServers: config.iceServers?.map((server) => ({
+        urls: server.urls,
+        hasUsername: Boolean(server.username),
+        hasCredential: Boolean(server.credential),
+      })),
+      iceTransportPolicy: config.iceTransportPolicy,
+    });
+
+    const connection = new RTCPeerConnection(config);
     connections.current[remote.id] = connection;
     updateRemotePeer(remote.id, { ...remote, connected: false });
 
     localStream.current?.getTracks().forEach((track) => {
       if (localStream.current) {
         connection.addTrack(track, localStream.current);
+        debugLog("added local track to peer", {
+          remoteId: remote.id,
+          track: summarizeTrack(track),
+        });
       }
     });
 
     connection.onicecandidate = (event) => {
       if (event.candidate) {
+        debugLog("send ice candidate", {
+          to: remote.id,
+          type: event.candidate.type,
+          protocol: event.candidate.protocol,
+          address: event.candidate.address,
+          port: event.candidate.port,
+          candidateType: event.candidate.candidate.split(" ")[7],
+        });
         send({
           type: "signal",
           to: remote.id,
@@ -179,14 +245,64 @@ export default function Home() {
 
     connection.ontrack = (event) => {
       const [stream] = event.streams;
+      debugLog("received remote track", {
+        remoteId: remote.id,
+        track: summarizeTrack(event.track),
+        streams: event.streams.map(summarizeStream),
+      });
+
+      event.track.onmute = () => {
+        debugLog("remote track muted", {
+          remoteId: remote.id,
+          track: summarizeTrack(event.track),
+        });
+      };
+
+      event.track.onunmute = () => {
+        debugLog("remote track unmuted", {
+          remoteId: remote.id,
+          track: summarizeTrack(event.track),
+        });
+      };
+
+      event.track.onended = () => {
+        debugLog("remote track ended", {
+          remoteId: remote.id,
+          track: summarizeTrack(event.track),
+        });
+      };
+
       updateRemotePeer(remote.id, {
         ...remote,
         stream,
         connected: true,
+        trackSummary: stream
+          .getTracks()
+          .map((track) => `${track.kind}:${track.readyState}:${track.muted ? "muted" : "unmuted"}`)
+          .join(", "),
       });
+
+      window.setTimeout(async () => {
+        try {
+          debugLog("receiver stats", {
+            remoteId: remote.id,
+            inboundVideo: summarizeReceiverStats(await connection.getStats()),
+          });
+        } catch (error) {
+          debugLog("receiver stats failed", error);
+        }
+      }, 3000);
     };
 
     function updateConnectionState() {
+      debugLog("connection state", {
+        remoteId: remote.id,
+        connectionState: connection.connectionState,
+        iceConnectionState: connection.iceConnectionState,
+        iceGatheringState: connection.iceGatheringState,
+        signalingState: connection.signalingState,
+      });
+
       updateRemotePeer(remote.id, {
         connected: connection.connectionState === "connected",
         state: connection.iceConnectionState,
@@ -215,6 +331,12 @@ export default function Home() {
     const connection = createConnection(remote);
     const offer = await connection.createOffer();
     await connection.setLocalDescription(offer);
+    debugLog("send offer", {
+      to: remote.id,
+      senders: connection.getSenders().map((sender) => ({
+        track: sender.track ? summarizeTrack(sender.track) : null,
+      })),
+    });
     send({
       type: "signal",
       to: remote.id,
@@ -225,12 +347,19 @@ export default function Home() {
   async function handleSignal(from: string, payload: SignalPayload) {
     const remote = remotePeersRef.current[from] || { id: from, name: "Guest" };
     const connection = createConnection(remote);
+    debugLog("handle signal", { from, type: payload.type });
 
     if (payload.type === "offer") {
       await connection.setRemoteDescription(payload.sdp);
       await flushPendingIceCandidates(from);
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
+      debugLog("send answer", {
+        to: from,
+        senders: connection.getSenders().map((sender) => ({
+          track: sender.track ? summarizeTrack(sender.track) : null,
+        })),
+      });
       send({
         type: "signal",
         to: from,
@@ -241,6 +370,7 @@ export default function Home() {
     if (payload.type === "answer") {
       await connection.setRemoteDescription(payload.sdp);
       await flushPendingIceCandidates(from);
+      debugLog("answer applied", { from });
     }
 
     if (payload.type === "ice") {
@@ -249,10 +379,12 @@ export default function Home() {
           ...(pendingIceCandidates.current[from] || []),
           payload.candidate,
         ];
+        debugLog("queued ice candidate", { from, candidate: payload.candidate.candidate });
         return;
       }
 
       await connection.addIceCandidate(payload.candidate);
+      debugLog("added ice candidate", { from, candidate: payload.candidate.candidate });
     }
   }
 
@@ -268,8 +400,10 @@ export default function Home() {
 
     const ws = new WebSocket(signalingUrl);
     socket.current = ws;
+    debugLog("open signaling socket", { signalingUrl });
 
     ws.onopen = () => {
+      debugLog("signaling socket open", { roomId, name: name || "Guest" });
       send({
         type: "join",
         roomId,
@@ -279,6 +413,10 @@ export default function Home() {
 
     ws.onmessage = async (event) => {
       const message = JSON.parse(event.data) as ServerMessage;
+      debugLog("signaling message", {
+        type: message.type,
+        from: "from" in message ? message.from : undefined,
+      });
 
       if (message.type === "joined") {
         setPeerId(message.peerId);
@@ -324,10 +462,12 @@ export default function Home() {
     };
 
     ws.onclose = () => {
+      debugLog("signaling socket closed");
       setStatus("Signaling server disconnected");
     };
 
     ws.onerror = () => {
+      debugLog("signaling socket error");
       setStatus("Could not connect to the signaling server");
     };
   }
@@ -508,13 +648,32 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
     setVideoReady(false);
     setPlaybackBlocked(false);
     element.srcObject = peer.stream;
+    debugLog("remote video element attached", {
+      peerId: peer.id,
+      tracks: summarizeStream(peer.stream),
+      readyState: element.readyState,
+      paused: element.paused,
+      muted: element.muted,
+    });
 
     const playRemoteVideo = async () => {
       try {
         await element.play();
         setPlaybackBlocked(false);
+        debugLog("remote video play resolved", {
+          peerId: peer.id,
+          readyState: element.readyState,
+          paused: element.paused,
+          width: element.videoWidth,
+          height: element.videoHeight,
+        });
       } catch {
         setPlaybackBlocked(true);
+        debugLog("remote video play blocked", {
+          peerId: peer.id,
+          readyState: element.readyState,
+          paused: element.paused,
+        });
       }
     };
 
@@ -527,8 +686,10 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
     try {
       await video.current.play();
       setPlaybackBlocked(false);
+      debugLog("manual remote video play resolved", { peerId: peer.id });
     } catch {
       setPlaybackBlocked(true);
+      debugLog("manual remote video play blocked", { peerId: peer.id });
     }
   }
 
@@ -539,7 +700,37 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
         autoPlay
         playsInline
         onCanPlay={startPlayback}
-        onPlaying={() => setVideoReady(true)}
+        onLoadedMetadata={(event) => {
+          const element = event.currentTarget;
+          debugLog("remote video metadata", {
+            peerId: peer.id,
+            width: element.videoWidth,
+            height: element.videoHeight,
+            readyState: element.readyState,
+          });
+        }}
+        onPlaying={(event) => {
+          const element = event.currentTarget;
+          setVideoReady(true);
+          debugLog("remote video playing", {
+            peerId: peer.id,
+            width: element.videoWidth,
+            height: element.videoHeight,
+            readyState: element.readyState,
+          });
+        }}
+        onWaiting={(event) => {
+          debugLog("remote video waiting", {
+            peerId: peer.id,
+            readyState: event.currentTarget.readyState,
+          });
+        }}
+        onError={(event) => {
+          debugLog("remote video error", {
+            peerId: peer.id,
+            error: event.currentTarget.error?.message,
+          });
+        }}
       />
       {!peer.stream ? <div className="avatar">{peer.name.slice(0, 1).toUpperCase()}</div> : null}
       {peer.stream && !videoReady ? (
@@ -552,6 +743,7 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
         <span className={peer.connected ? "online" : "connecting"}>
           {peer.connected ? "Live" : peer.state || "Connecting"}
         </span>
+        {peer.trackSummary ? <span className="connecting">{peer.trackSummary}</span> : null}
       </div>
     </article>
   );
