@@ -22,6 +22,7 @@ type RemotePeer = PeerInfo & {
   connected: boolean;
   state?: string;
   trackSummary?: string;
+  mediaSummary?: string;
 };
 
 type SignalPayload =
@@ -62,6 +63,8 @@ function summarizeStream(stream: MediaStream) {
 
 function summarizeReceiverStats(report: RTCStatsReport) {
   const inboundVideo = [];
+  const outboundVideo = [];
+  const candidatePairs = [];
 
   for (const stat of report.values()) {
     if (stat.type === "inbound-rtp" && stat.kind === "video") {
@@ -76,9 +79,30 @@ function summarizeReceiverStats(report: RTCStatsReport) {
         jitter: stat.jitter,
       });
     }
+
+    if (stat.type === "outbound-rtp" && stat.kind === "video") {
+      outboundVideo.push({
+        packetsSent: stat.packetsSent,
+        bytesSent: stat.bytesSent,
+        framesEncoded: stat.framesEncoded,
+        framesSent: stat.framesSent,
+        frameWidth: stat.frameWidth,
+        frameHeight: stat.frameHeight,
+      });
+    }
+
+    if (stat.type === "candidate-pair" && stat.state === "succeeded") {
+      candidatePairs.push({
+        nominated: stat.nominated,
+        bytesSent: stat.bytesSent,
+        bytesReceived: stat.bytesReceived,
+        currentRoundTripTime: stat.currentRoundTripTime,
+        availableOutgoingBitrate: stat.availableOutgoingBitrate,
+      });
+    }
   }
 
-  return inboundVideo;
+  return { inboundVideo, outboundVideo, candidatePairs };
 }
 
 function getIceConfiguration(): RTCConfiguration {
@@ -131,6 +155,7 @@ export default function Home() {
   const screenStream = useRef<MediaStream | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const connections = useRef<Record<string, RTCPeerConnection>>({});
+  const statsTimers = useRef<Record<string, number>>({});
   const pendingIceCandidates = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const remotePeersRef = useRef<Record<string, RemotePeer>>({});
 
@@ -281,18 +306,36 @@ export default function Home() {
           .map((track) => `${track.kind}:${track.readyState}:${track.muted ? "muted" : "unmuted"}`)
           .join(", "),
       });
+    };
 
-      window.setTimeout(async () => {
+    if (!statsTimers.current[remote.id]) {
+      statsTimers.current[remote.id] = window.setInterval(async () => {
         try {
-          debugLog("receiver stats", {
+          const stats = summarizeReceiverStats(await connection.getStats());
+          const inbound = stats.inboundVideo[0];
+          const outbound = stats.outboundVideo[0];
+
+          updateRemotePeer(remote.id, {
+            mediaSummary: inbound
+              ? `in:${inbound.framesDecoded ?? 0} out:${outbound?.framesEncoded ?? 0}`
+              : `in:0 out:${outbound?.framesEncoded ?? 0}`,
+          });
+
+          debugLog("peer stats", {
             remoteId: remote.id,
-            inboundVideo: summarizeReceiverStats(await connection.getStats()),
+            ...stats,
+            receivers: connection.getReceivers().map((receiver) => ({
+              track: receiver.track ? summarizeTrack(receiver.track) : null,
+            })),
+            senders: connection.getSenders().map((sender) => ({
+              track: sender.track ? summarizeTrack(sender.track) : null,
+            })),
           });
         } catch (error) {
-          debugLog("receiver stats failed", error);
+          debugLog("peer stats failed", error);
         }
       }, 3000);
-    };
+    }
 
     function updateConnectionState() {
       debugLog("connection state", {
@@ -444,6 +487,10 @@ export default function Home() {
       if (message.type === "peer-left") {
         connections.current[message.peerId]?.close();
         delete connections.current[message.peerId];
+        if (statsTimers.current[message.peerId]) {
+          window.clearInterval(statsTimers.current[message.peerId]);
+          delete statsTimers.current[message.peerId];
+        }
         delete pendingIceCandidates.current[message.peerId];
         setRemotePeers((current) => {
           const next = { ...current };
@@ -474,7 +521,9 @@ export default function Home() {
 
   function leaveRoom() {
     Object.values(connections.current).forEach((connection) => connection.close());
+    Object.values(statsTimers.current).forEach((timer) => window.clearInterval(timer));
     connections.current = {};
+    statsTimers.current = {};
     pendingIceCandidates.current = {};
     socket.current?.close();
     socket.current = null;
@@ -744,6 +793,7 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
           {peer.connected ? "Live" : peer.state || "Connecting"}
         </span>
         {peer.trackSummary ? <span className="connecting">{peer.trackSummary}</span> : null}
+        {peer.mediaSummary ? <span className="connecting">{peer.mediaSummary}</span> : null}
       </div>
     </article>
   );
