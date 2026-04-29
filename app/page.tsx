@@ -46,6 +46,10 @@ function getSignalingUrl() {
   const configuredUrl = process.env.NEXT_PUBLIC_SIGNALING_URL?.trim();
   if (configuredUrl) return configuredUrl;
 
+  if (window.location.hostname.endsWith(".vercel.app")) {
+    return null;
+  }
+
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   return `${protocol}://${window.location.host}/ws`;
 }
@@ -211,7 +215,13 @@ export default function Home() {
     setStatus("Opening camera and microphone...");
     await ensureMedia();
 
-    const ws = new WebSocket(getSignalingUrl());
+    const signalingUrl = getSignalingUrl();
+    if (!signalingUrl) {
+      setStatus("Set NEXT_PUBLIC_SIGNALING_URL in Vercel to your WebSocket server");
+      return;
+    }
+
+    const ws = new WebSocket(signalingUrl);
     socket.current = ws;
 
     ws.onopen = () => {

@@ -29,6 +29,21 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 Vercel can host the Next.js UI, but it does not run the custom long-lived WebSocket server used by this project. Deploy `signaling-server.js` separately to a Node host that supports WebSockets, such as Render, Railway, Fly.io, or a VPS.
 
+### Render Example
+
+This repo includes `render.yaml`. On Render, create a new Blueprint from the GitHub repository and Render will start the signaling service with:
+
+```bash
+npm run signal
+```
+
+After Render deploys, copy its public URL and convert it to WebSocket format:
+
+```bash
+https://videocall-signaling.onrender.com
+wss://videocall-signaling.onrender.com/ws
+```
+
 Set this environment variable in Vercel after deploying the signaling server:
 
 ```bash
