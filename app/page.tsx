@@ -20,6 +20,7 @@ type PeerInfo = {
 type RemotePeer = PeerInfo & {
   stream?: MediaStream;
   connected: boolean;
+  state?: string;
 };
 
 type SignalPayload =
@@ -71,6 +72,7 @@ export default function Home() {
   const screenStream = useRef<MediaStream | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const connections = useRef<Record<string, RTCPeerConnection>>({});
+  const pendingIceCandidates = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const remotePeersRef = useRef<Record<string, RemotePeer>>({});
 
   const inviteLink = useMemo(() => {
@@ -167,13 +169,29 @@ export default function Home() {
       });
     };
 
-    connection.onconnectionstatechange = () => {
+    function updateConnectionState() {
       updateRemotePeer(remote.id, {
         connected: connection.connectionState === "connected",
+        state: connection.iceConnectionState,
       });
-    };
+    }
+
+    connection.onconnectionstatechange = updateConnectionState;
+    connection.oniceconnectionstatechange = updateConnectionState;
 
     return connection;
+  }
+
+  async function flushPendingIceCandidates(peerIdToFlush: string) {
+    const connection = connections.current[peerIdToFlush];
+    const candidates = pendingIceCandidates.current[peerIdToFlush] || [];
+
+    if (!connection?.remoteDescription || candidates.length === 0) return;
+
+    pendingIceCandidates.current[peerIdToFlush] = [];
+    for (const candidate of candidates) {
+      await connection.addIceCandidate(candidate);
+    }
   }
 
   async function callPeer(remote: PeerInfo) {
@@ -193,6 +211,7 @@ export default function Home() {
 
     if (payload.type === "offer") {
       await connection.setRemoteDescription(payload.sdp);
+      await flushPendingIceCandidates(from);
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
       send({
@@ -204,9 +223,18 @@ export default function Home() {
 
     if (payload.type === "answer") {
       await connection.setRemoteDescription(payload.sdp);
+      await flushPendingIceCandidates(from);
     }
 
     if (payload.type === "ice") {
+      if (!connection.remoteDescription) {
+        pendingIceCandidates.current[from] = [
+          ...(pendingIceCandidates.current[from] || []),
+          payload.candidate,
+        ];
+        return;
+      }
+
       await connection.addIceCandidate(payload.candidate);
     }
   }
@@ -261,6 +289,7 @@ export default function Home() {
       if (message.type === "peer-left") {
         connections.current[message.peerId]?.close();
         delete connections.current[message.peerId];
+        delete pendingIceCandidates.current[message.peerId];
         setRemotePeers((current) => {
           const next = { ...current };
           delete next[message.peerId];
@@ -289,6 +318,7 @@ export default function Home() {
   function leaveRoom() {
     Object.values(connections.current).forEach((connection) => connection.close());
     connections.current = {};
+    pendingIceCandidates.current = {};
     socket.current?.close();
     socket.current = null;
     localStream.current?.getTracks().forEach((track) => track.stop());
@@ -465,7 +495,7 @@ function RemoteTile({ peer }: { peer: RemotePeer }) {
       <div className="nameplate">
         {peer.name}
         <span className={peer.connected ? "online" : "connecting"}>
-          {peer.connected ? "Live" : "Connecting"}
+          {peer.connected ? "Live" : peer.state || "Connecting"}
         </span>
       </div>
     </article>
